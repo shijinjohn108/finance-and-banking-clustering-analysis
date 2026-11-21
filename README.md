@@ -8,6 +8,8 @@ A student-friendly local project for exploring financial and banking **tabular**
 - User-selected numeric and categorical features. Numeric gaps use median imputation; categories are indexed and one-hot encoded; assembled vectors are standardized.
 - Spark SQL row counts and a numeric-column profile.
 - A Financial summaries page with schema-driven numeric summaries and optional category breakdowns for any uploaded dataset.
+- A Trends over time page with selectable date formats or separate month/day/year columns, measures, aggregation methods, time intervals, optional category series, and CSV export.
+- A downloadable, self-contained HTML analysis report with dataset quality, detected schema, aggregate results, and interactive charts from the current dashboard page.
 - Spark MLlib K-Means with a user-selected K and silhouette evaluation.
 - The Clustering sidebar expands into separate Run K-Means and Compare K values pages that share the selected features.
 - Compare silhouette scores for K=2 through a selected upper bound, then optionally use the best-scoring K from that comparison.
