@@ -9,6 +9,8 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 from src.spark_engine import cluster_dataset, create_spark, inspect_dataset, read_dataset
 
@@ -26,11 +28,22 @@ with st.sidebar:
     st.markdown("<div class='nav-heading'>WORKSPACE</div>", unsafe_allow_html=True)
     workspace_page = st.radio(
         "Workspace section",
-        ["Explore data", "Clustering", "Spark SQL"],
-        format_func=lambda page: {"Explore data": "▦   Explore data", "Clustering": "✳   Clustering", "Spark SQL": "⌘   Spark SQL"}[page],
+        ["Explore data", "Financial summaries", "Clustering", "Spark SQL"],
+        format_func=lambda page: {"Explore data": "▦   Explore data", "Financial summaries": "＄   Financial summaries", "Clustering": "✳   Clustering", "Spark SQL": "⌘   Spark SQL"}[page],
         key="workspace_page",
         label_visibility="collapsed",
     )
+    if workspace_page == "Clustering":
+        st.markdown("<div class='nav-subheading'>CLUSTERING</div>", unsafe_allow_html=True)
+        clustering_page = st.radio(
+            "Clustering page",
+            ["Run K-Means", "Compare K values"],
+            format_func=lambda page: {"Run K-Means": "◎   Run K-Means", "Compare K values": "↗   Compare K values"}[page],
+            key="clustering_page_choice",
+            label_visibility="collapsed",
+        )
+    else:
+        clustering_page = None
 
 if dark_mode:
     page, panel, text, muted, border, field, scheme = "#0b1422", "#111f31", "#e8eff7", "#afbdcc", "#2b4058", "#14253a", "dark"
@@ -53,6 +66,7 @@ section[data-testid="stSidebar"] {{min-width:270px!important;max-width:290px!imp
 [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{color:#edf5fc!important}}
 [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{color:#c0d0df!important;opacity:1}}
 .nav-heading {{margin:1rem 0 .55rem;color:#86a2ba;font-size:.68rem;font-weight:800;letter-spacing:.16em}}
+.nav-subheading {{margin:.9rem 0 .4rem .65rem;padding-left:.65rem;border-left:2px solid #31b9cf;color:#7fd7da;font-size:.65rem;font-weight:800;letter-spacing:.14em}}
 [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] {{gap:.3rem}}
 [data-testid="stSidebar"] [data-testid="stRadio"] label {{padding:.55rem .65rem;border:1px solid transparent;border-radius:11px;transition:all .16s ease}}
 [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {{background:#ffffff0d;border-color:#ffffff18}}
@@ -123,6 +137,10 @@ def display_table(frame: pd.DataFrame, max_height: int = 440) -> None:
         unsafe_allow_html=True,
     )
 
+def select_recommended_k(k_value: int) -> None:
+    st.session_state["selected_k"] = int(k_value)
+    st.session_state["clustering_page_choice"] = "Run K-Means"
+
 st.markdown('<div class="hero"><div class="hero-kicker">FINANCE ANALYTICS · POWERED BY SPARK</div><h1>FinSight</h1><p>See the patterns behind your financial data.</p></div>', unsafe_allow_html=True)
 
 if not uploaded:
@@ -149,7 +167,7 @@ if not uploaded:
     with b:
         st.markdown('<div class="feature-card"><div class="feature-icon">SQL</div><h3>Ask your data</h3><p>Run Spark SQL to filter, group, count, and profile your records.</p></div>', unsafe_allow_html=True)
     with c:
-        st.markdown('<div class="feature-card"><div class="feature-icon">K</div><h3>Find useful groups</h3><p>Build K-Means segments, review the silhouette score, and export results.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="feature-card"><div class="feature-icon">K</div><h3>Find useful groups</h3><p>Compare K values, profile segments, and export the results.</p></div>', unsafe_allow_html=True)
     st.markdown('<div class="section-kicker" style="margin-top:1.5rem">FOUR SIMPLE STEPS</div>', unsafe_allow_html=True)
     steps = st.columns(4, gap="small")
     step_data = [("01", "Upload", "Choose a CSV or Parquet dataset."), ("02", "Review", "Confirm before analysis begins."), ("03", "Explore", "Inspect quality and query with SQL."), ("04", "Segment", "Run K-Means and export clusters.")]
@@ -165,6 +183,18 @@ if st.session_state.get("active_upload") != upload_identity:
     st.session_state.pop("cluster_score", None)
     st.session_state.pop("confirmed_upload", None)
     st.session_state.pop("cancelled_upload", None)
+    st.session_state.pop("k_comparison", None)
+    st.session_state.pop("k_comparison_key", None)
+    st.session_state.pop("compare_max_k", None)
+    st.session_state.pop("selected_k", None)
+    st.session_state.pop("cluster_features_input", None)
+    st.session_state.pop("outcome_column", None)
+    st.session_state.pop("financial_measure", None)
+    st.session_state.pop("financial_group_by", None)
+    st.session_state.pop("financial_top_groups", None)
+    st.session_state.pop("segment_drilldown_cluster", None)
+    st.session_state.pop("segment_category_feature", None)
+    st.session_state.pop("segment_numeric_feature", None)
     previous_path = st.session_state.pop("upload_temp_path", None)
     if previous_path and os.path.exists(previous_path):
         os.unlink(previous_path)
@@ -225,42 +255,338 @@ if workspace_page == "Explore data":
     display_table(df.limit(100).toPandas())
     st.caption("No records are silently removed. Numeric missing values are imputed during modeling; categorical missing values are handled by Spark's invalid-category option.")
 
+elif workspace_page == "Financial summaries":
+    st.markdown("#### Financial summaries")
+    st.caption("Choose a numeric measure from your uploaded data. These are descriptive calculations; check what each row and field mean before interpreting totals.")
+    if not info["numeric"]:
+        st.info("This dataset has no detected numeric columns to summarize.")
+    else:
+        measure = st.selectbox("Numeric measure", options=info["numeric"], key="financial_measure")
+        group_options = ["None"] + list(info.get("categorical", []))
+        group_by = st.selectbox(
+            "Break down by (optional)",
+            options=group_options,
+            key="financial_group_by",
+            help="Pick a category such as a product, region, or status if your dataset has one.",
+        )
+        quoted_measure = "`" + measure.replace("`", "``") + "`"
+        measure_col = F.col(quoted_measure)
+        measure_summary = df.agg(
+            F.count(measure_col).alias("Non-missing records"),
+            F.round(F.sum(measure_col), 2).alias(f"Sum · {measure}"),
+            F.round(F.avg(measure_col), 2).alias(f"Average · {measure}"),
+            F.round(F.expr(f"percentile_approx({quoted_measure}, 0.5, 10000)"), 2).alias(f"Median · {measure}"),
+            F.round(F.min(measure_col), 2).alias(f"Minimum · {measure}"),
+            F.round(F.max(measure_col), 2).alias(f"Maximum · {measure}"),
+        ).toPandas()
+        display_table(measure_summary)
+        st.caption("The sum is an arithmetic total across rows. It may not represent consolidated financial value, especially when rows are balances, snapshots, or repeated account records.")
+
+        if group_by != "None":
+            st.markdown(f"#### {measure} by {group_by}")
+            max_groups = st.slider("Categories to show", min_value=5, max_value=25, value=10, key="financial_top_groups")
+            quoted_group = "`" + group_by.replace("`", "``") + "`"
+            group_col = F.coalesce(F.col(quoted_group).cast("string"), F.lit("Missing"))
+            grouped = (
+                df.groupBy(group_col.alias("Category"))
+                .agg(
+                    F.count(F.lit(1)).alias("Records"),
+                    F.count(measure_col).alias("Non-missing measures"),
+                    F.round(F.sum(measure_col), 2).alias(f"Sum · {measure}"),
+                    F.round(F.avg(measure_col), 2).alias(f"Average · {measure}"),
+                )
+                .orderBy(F.col(f"Sum · {measure}").desc_nulls_last())
+                .limit(max_groups)
+            )
+            grouped_pd = grouped.toPandas()
+            display_table(grouped_pd)
+            if not grouped_pd.empty and grouped_pd[f"Sum · {measure}"].notna().any():
+                financial_fig = px.bar(
+                    grouped_pd,
+                    x="Category",
+                    y=f"Sum · {measure}",
+                    title=f"Sum of {measure} by {group_by} (top {len(grouped_pd)})",
+                    color="Category",
+                    color_discrete_sequence=["#31b9cf", "#9a6cff", "#42c6a5", "#efb750", "#ed7b8e"],
+                )
+                financial_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color": text, "family": "Inter, Segoe UI, sans-serif"}, title_font={"color": text, "size": 16}, showlegend=False, margin={"l": 16, "r": 12, "t": 48, "b": 16})
+                financial_fig.update_xaxes(showgrid=False, linecolor=border, tickfont_color=muted, tickangle=-25)
+                financial_fig.update_yaxes(gridcolor=border, zerolinecolor=border, tickfont_color=muted, title_font_color=muted)
+                st.plotly_chart(financial_fig, use_container_width=True)
+
 elif workspace_page == "Clustering":
-    st.markdown("#### Configure a segmentation")
     defaults = info["numeric"] or df.columns
-    features = st.multiselect("Features to cluster on", options=df.columns, default=defaults, help="Pick fields that describe the observations. Exclude IDs, names, dates, and direct labels unless there is a clear analytical reason to include them.")
-    max_k = max(2, min(10, info["rows"]))
-    k = st.slider("Number of clusters (K)", min_value=2, max_value=max_k, value=min(3,max_k))
-    if st.button("Run K-Means with Spark", type="primary", disabled=info["rows"] < 2 or len(features) == 0):
-        with st.spinner("Preparing features and fitting Spark MLlib K-Means…"):
-            try:
-                result, score = cluster_dataset(df, features, k)
-                st.session_state.cluster_result = result
-                st.session_state.cluster_score = score
-                st.session_state.cluster_k = k
-            except Exception as exc:
-                st.error(f"Clustering could not be completed: {exc}")
-    if "cluster_result" in st.session_state:
-        result = st.session_state.cluster_result
-        score = st.session_state.cluster_score
-        st.metric("Silhouette score", f"{score:.3f}", help="Values closer to 1 generally indicate more distinct clusters; interpret this alongside cluster sizes and the chosen features.")
-        summary = result.groupBy("prediction").count().orderBy("prediction").toPandas().rename(columns={"prediction":"Cluster", "count":"Records"})
-        left,right=st.columns([1,1])
-        with left:
-            bar_fig = px.bar(summary, x="Cluster", y="Records", color="Cluster", title="Records per cluster", color_discrete_sequence=["#31b9cf","#9a6cff","#42c6a5","#efb750","#ed7b8e"])
-            bar_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color":text,"family":"Inter, Segoe UI, sans-serif"}, title_font={"color":text,"size":16}, legend_title_text="Segment", margin={"l":16,"r":12,"t":48,"b":16})
-            bar_fig.update_xaxes(showgrid=False, linecolor=border, tickfont_color=muted)
-            bar_fig.update_yaxes(gridcolor=border, zerolinecolor=border, tickfont_color=muted, title_font_color=muted)
-            st.plotly_chart(bar_fig, use_container_width=True)
-        with right:
-            pie_fig = px.pie(summary, names="Cluster", values="Records", hole=.68, title="Cluster distribution", color_discrete_sequence=["#31b9cf","#9a6cff","#42c6a5","#efb750","#ed7b8e"])
-            pie_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color":text,"family":"Inter, Segoe UI, sans-serif"}, title_font={"color":text,"size":16}, legend_title_text="Segment", margin={"l":12,"r":12,"t":48,"b":16})
-            pie_fig.update_traces(textfont_color="#f4f7fb", marker_line_color=panel, marker_line_width=2)
-            st.plotly_chart(pie_fig, use_container_width=True)
-        display_table(result.limit(100).toPandas())
-        csv_bytes = result.toPandas().to_csv(index=False).encode("utf-8-sig")
-        st.download_button("Download clustered records (CSV)", data=csv_bytes, file_name="clustered_records.csv", mime="text/csv")
-        st.caption("The silhouette score is calculated with Spark MLlib's squared Euclidean distance. K-Means is sensitive to feature choice and outliers; compare a few K values before drawing conclusions.")
+    st.markdown("#### Clustering features")
+    features = st.multiselect("Features to cluster on", options=df.columns, default=defaults, key="cluster_features_input", help="Pick fields that describe the observations. Exclude IDs, names, dates, and direct labels unless there is a clear analytical reason to include them.")
+    outcome_options = ["None"] + list(df.columns)
+    outcome_default = outcome_options.index(st.session_state["outcome_column"]) if st.session_state.get("outcome_column") in df.columns else 0
+    outcome_choice = st.selectbox(
+        "Outcome column (optional)",
+        options=outcome_options,
+        index=outcome_default,
+        key="outcome_column",
+        help="Choose a result or label to describe after clustering. It is excluded from K-Means so it cannot influence the groups.",
+    )
+    outcome_column = None if outcome_choice == "None" else outcome_choice
+    model_features = [feature for feature in features if feature != outcome_column]
+    if outcome_column in features:
+        st.info(f"‘{outcome_column}’ is selected as the outcome, so it will be left out of the clustering features.")
+    if outcome_column:
+        st.caption(f"Outcome selected: **{outcome_column}**. It will be summarized by cluster after K-Means runs.")
+
+    if clustering_page == "Compare K values":
+        st.markdown("#### Compare candidate cluster counts")
+        if info["rows"] < 3:
+            st.info("At least three records are needed to compare multiple K values.")
+        else:
+            compare_upper = min(8, info["rows"])
+            compare_max = st.slider(
+                "Compare K from 2 through",
+                min_value=3,
+                max_value=compare_upper,
+                value=min(5, compare_upper),
+                key="compare_max_k",
+            )
+            comparison_key = (tuple(model_features), compare_max)
+            if st.session_state.get("k_comparison_key") not in (None, comparison_key):
+                st.session_state.pop("k_comparison", None)
+                st.session_state.pop("k_comparison_key", None)
+            st.caption("Spark fits a separate model for each K in the range. This can take a little time on a large dataset.")
+            if st.button("Compare K values", key="compare_k_values", type="primary", disabled=not model_features):
+                try:
+                    with st.spinner(f"Comparing K=2 through K={compare_max} with Spark…"):
+                        scores = []
+                        for candidate_k in range(2, compare_max + 1):
+                            _, candidate_score = cluster_dataset(df, model_features, candidate_k)
+                            scores.append({"K": candidate_k, "Silhouette": candidate_score})
+                    st.session_state["k_comparison"] = scores
+                    st.session_state["k_comparison_key"] = comparison_key
+                except Exception as exc:
+                    st.error(f"K comparison could not be completed: {exc}")
+
+            if st.session_state.get("k_comparison_key") == comparison_key:
+                comparison = pd.DataFrame(st.session_state["k_comparison"])
+                best_row = comparison.loc[comparison["Silhouette"].idxmax()]
+                best_k = int(best_row["K"])
+                best_score = float(best_row["Silhouette"])
+                score_col, use_col = st.columns([1, 2])
+                score_col.metric("Highest score in this range", f"{best_score:.3f}", help="A higher silhouette score is generally preferable, but also check cluster balance and interpretability.")
+                if best_k != st.session_state.get("selected_k", min(3, max(2, min(10, info["rows"])) )):
+                    use_col.button(
+                        f"Use K = {best_k} in Run K-Means",
+                        key="use_compared_k",
+                        on_click=select_recommended_k,
+                        args=(best_k,),
+                    )
+                compare_fig = px.line(comparison, x="K", y="Silhouette", markers=True, title="Silhouette by cluster count")
+                compare_fig.update_traces(line={"color":"#31b9cf","width":3}, marker={"color":"#9a6cff","size":10})
+                compare_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color":text,"family":"Inter, Segoe UI, sans-serif"}, title_font={"color":text,"size":16}, margin={"l":16,"r":12,"t":48,"b":16})
+                compare_fig.update_xaxes(dtick=1, showgrid=False, linecolor=border, tickfont_color=muted)
+                compare_fig.update_yaxes(gridcolor=border, zerolinecolor=border, tickfont_color=muted, title_font_color=muted)
+                st.plotly_chart(compare_fig, use_container_width=True)
+                display_table(comparison)
+                st.caption("This is the highest score among the K values tested. Review cluster profiles and size balance on the Run K-Means page before choosing K.")
+
+    else:
+        st.markdown("#### Run K-Means")
+        max_k = max(2, min(10, info["rows"]))
+        k = st.slider("Number of clusters (K)", min_value=2, max_value=max_k, value=min(3,max_k), key="selected_k")
+        if "cluster_result" in st.session_state and (
+            tuple(st.session_state.get("cluster_features", ())) != tuple(model_features)
+            or st.session_state.get("cluster_k") != k
+        ):
+            st.session_state.pop("cluster_result", None)
+            st.session_state.pop("cluster_score", None)
+            st.session_state.pop("segment_drilldown_cluster", None)
+            st.session_state.pop("segment_category_feature", None)
+            st.session_state.pop("segment_numeric_feature", None)
+        if st.button("Run K-Means with Spark", type="primary", disabled=info["rows"] < 2 or len(model_features) == 0):
+            with st.spinner("Preparing features and fitting Spark MLlib K-Means…"):
+                try:
+                    result, score = cluster_dataset(df, model_features, k)
+                    st.session_state.cluster_result = result
+                    st.session_state.cluster_score = score
+                    st.session_state.cluster_k = k
+                    st.session_state.cluster_features = tuple(model_features)
+                    st.session_state.cluster_outcome = outcome_column
+                except Exception as exc:
+                    st.error(f"Clustering could not be completed: {exc}")
+        if "cluster_result" in st.session_state:
+            result = st.session_state.cluster_result
+            score = st.session_state.cluster_score
+            st.metric("Silhouette score", f"{score:.3f}", help="Values closer to 1 generally indicate more distinct clusters; interpret this alongside cluster sizes and the chosen features.")
+            summary = result.groupBy("prediction").count().orderBy("prediction").toPandas().rename(columns={"prediction":"Cluster", "count":"Records"})
+            left,right=st.columns([1,1])
+            with left:
+                bar_fig = px.bar(summary, x="Cluster", y="Records", color="Cluster", title="Records per cluster", color_discrete_sequence=["#31b9cf","#9a6cff","#42c6a5","#efb750","#ed7b8e"])
+                bar_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color":text,"family":"Inter, Segoe UI, sans-serif"}, title_font={"color":text,"size":16}, legend_title_text="Segment", margin={"l":16,"r":12,"t":48,"b":16})
+                bar_fig.update_xaxes(showgrid=False, linecolor=border, tickfont_color=muted)
+                bar_fig.update_yaxes(gridcolor=border, zerolinecolor=border, tickfont_color=muted, title_font_color=muted)
+                st.plotly_chart(bar_fig, use_container_width=True)
+            with right:
+                pie_fig = px.pie(summary, names="Cluster", values="Records", hole=.68, title="Cluster distribution", color_discrete_sequence=["#31b9cf","#9a6cff","#42c6a5","#efb750","#ed7b8e"])
+                pie_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color":text,"family":"Inter, Segoe UI, sans-serif"}, title_font={"color":text,"size":16}, legend_title_text="Segment", margin={"l":12,"r":12,"t":48,"b":16})
+                pie_fig.update_traces(textfont_color="#f4f7fb", marker_line_color=panel, marker_line_width=2)
+                st.plotly_chart(pie_fig, use_container_width=True)
+            st.markdown("#### Cluster profiles")
+            st.caption("Numeric features show their cluster average; categorical features show their most common value.")
+            model_features = st.session_state.get("cluster_features", tuple(features))
+            profile_aggs = [F.count(F.lit(1)).alias("Records")]
+            numeric_features = set(info["numeric"])
+            for feature in model_features:
+                quoted_feature = "`" + feature.replace("`", "``") + "`"
+                column = F.col(quoted_feature)
+                if feature in numeric_features:
+                    profile_aggs.append(F.round(F.avg(column), 2).alias(f"Average · {feature}"))
+                else:
+                    profile_aggs.append(F.mode(column).alias(f"Most common · {feature}"))
+            profile = result.groupBy("prediction").agg(*profile_aggs).orderBy("prediction").toPandas().rename(columns={"prediction":"Cluster"})
+            display_table(profile)
+            if outcome_column:
+                st.markdown("#### Outcome by cluster")
+                st.caption(f"This describes **{outcome_column}** for the assigned groups. The outcome was excluded from the K-Means model.")
+                quoted_outcome = "`" + outcome_column.replace("`", "``") + "`"
+                outcome_value = F.col(quoted_outcome)
+                if outcome_column in numeric_features:
+                    outcome_summary = (
+                        result.groupBy("prediction")
+                        .agg(
+                            F.count(F.lit(1)).alias("Records"),
+                            F.count(outcome_value).alias("Non-missing outcomes"),
+                            F.round(F.avg(outcome_value), 2).alias(f"Average · {outcome_column}"),
+                        )
+                        .orderBy("prediction")
+                        .toPandas()
+                        .rename(columns={"prediction": "Cluster"})
+                    )
+                    display_table(outcome_summary)
+                    average_column = f"Average · {outcome_column}"
+                    chart_data = outcome_summary.dropna(subset=[average_column])
+                    if not chart_data.empty:
+                        outcome_fig = px.bar(
+                            chart_data,
+                            x="Cluster",
+                            y=average_column,
+                            color="Cluster",
+                            title=f"Average {outcome_column} by cluster",
+                            color_discrete_sequence=["#31b9cf", "#9a6cff", "#42c6a5", "#efb750", "#ed7b8e"],
+                        )
+                        outcome_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color": text, "family": "Inter, Segoe UI, sans-serif"}, title_font={"color": text, "size": 16}, showlegend=False, margin={"l": 16, "r": 12, "t": 48, "b": 16})
+                        outcome_fig.update_xaxes(showgrid=False, linecolor=border, tickfont_color=muted)
+                        outcome_fig.update_yaxes(gridcolor=border, zerolinecolor=border, tickfont_color=muted, title_font_color=muted)
+                        st.plotly_chart(outcome_fig, use_container_width=True)
+                else:
+                    outcome_groups = (
+                        result.groupBy("prediction", F.coalesce(outcome_value.cast("string"), F.lit("Missing")).alias("Outcome"))
+                        .agg(F.count(F.lit(1)).alias("Records"))
+                        .withColumnRenamed("prediction", "Cluster")
+                    )
+                    outcome_groups = outcome_groups.withColumn(
+                        "Share (%)",
+                        F.round(F.col("Records") * 100.0 / F.sum("Records").over(Window.partitionBy("Cluster")), 1),
+                    ).orderBy("Cluster", "Outcome")
+                    outcome_pd = outcome_groups.toPandas()
+                    display_table(outcome_pd)
+                    if outcome_pd["Outcome"].nunique() <= 12:
+                        outcome_fig = px.bar(
+                            outcome_pd,
+                            x="Cluster",
+                            y="Share (%)",
+                            color="Outcome",
+                            barmode="stack",
+                            title=f"{outcome_column} mix within each cluster",
+                        )
+                        outcome_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color": text, "family": "Inter, Segoe UI, sans-serif"}, title_font={"color": text, "size": 16}, legend_title_text=outcome_column, margin={"l": 16, "r": 12, "t": 48, "b": 16})
+                        outcome_fig.update_xaxes(showgrid=False, linecolor=border, tickfont_color=muted)
+                        outcome_fig.update_yaxes(range=[0, 100], ticksuffix="%", gridcolor=border, zerolinecolor=border, tickfont_color=muted, title_font_color=muted)
+                        st.plotly_chart(outcome_fig, use_container_width=True)
+                    else:
+                        st.caption("The table lists all outcome values. The chart is hidden because this column has more than 12 distinct values.")
+            st.markdown("#### Segment drill-down")
+            segment_records = summary.set_index("Cluster")["Records"].to_dict()
+            segment_ids = list(segment_records)
+            selected_segment = st.selectbox(
+                "Choose a cluster to inspect",
+                options=segment_ids,
+                format_func=lambda cluster_id: f"Cluster {cluster_id} · {segment_records[cluster_id]:,} records",
+                key="segment_drilldown_cluster",
+            )
+            segment = result.filter(F.col("prediction") == selected_segment)
+            selected_count = int(segment_records[selected_segment])
+            segment_share = selected_count / max(int(info["rows"]), 1) * 100
+            drill_metrics = st.columns(3)
+            drill_metrics[0].metric("Records in cluster", f"{selected_count:,}")
+            drill_metrics[1].metric("Share of dataset", f"{segment_share:.1f}%")
+            drill_metrics[2].metric("Features used", len(model_features))
+            selected_profile = profile.loc[profile["Cluster"] == selected_segment]
+            st.markdown("##### This cluster's profile")
+            display_table(selected_profile)
+
+            categorical_model_features = [feature for feature in model_features if feature not in numeric_features]
+            numeric_model_features = [feature for feature in model_features if feature in numeric_features]
+            if categorical_model_features:
+                selected_category_feature = st.selectbox(
+                    "Explore a categorical feature",
+                    options=categorical_model_features,
+                    key="segment_category_feature",
+                )
+                quoted_category_feature = "`" + selected_category_feature.replace("`", "``") + "`"
+                category_breakdown = (
+                    segment.groupBy(F.coalesce(F.col(quoted_category_feature).cast("string"), F.lit("Missing")).alias("Value"))
+                    .agg(F.count(F.lit(1)).alias("Records"))
+                    .withColumn("Share (%)", F.round(F.col("Records") * 100.0 / F.lit(selected_count), 1))
+                    .orderBy(F.col("Records").desc(), F.col("Value"))
+                    .limit(15)
+                )
+                category_pd = category_breakdown.toPandas()
+                st.markdown(f"##### {selected_category_feature} in Cluster {selected_segment}")
+                display_table(category_pd)
+                if not category_pd.empty:
+                    category_fig = px.bar(category_pd, x="Share (%)", y="Value", orientation="h", title=f"Most common {selected_category_feature} values", color="Share (%)", color_continuous_scale=["#31b9cf", "#9a6cff"])
+                    category_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color": text, "family": "Inter, Segoe UI, sans-serif"}, title_font={"color": text, "size": 16}, coloraxis_showscale=False, margin={"l": 16, "r": 12, "t": 48, "b": 16})
+                    category_fig.update_xaxes(range=[0, 100], ticksuffix="%", gridcolor=border, tickfont_color=muted, title_font_color=muted)
+                    category_fig.update_yaxes(autorange="reversed", showgrid=False, tickfont_color=muted)
+                    st.plotly_chart(category_fig, use_container_width=True)
+
+            if numeric_model_features:
+                selected_numeric_feature = st.selectbox(
+                    "Explore a numeric feature",
+                    options=numeric_model_features,
+                    key="segment_numeric_feature",
+                )
+                quoted_numeric_feature = "`" + selected_numeric_feature.replace("`", "``") + "`"
+                numeric_sample = (
+                    segment.select(F.col(quoted_numeric_feature).alias("Value"))
+                    .where(F.col("Value").isNotNull())
+                    .sample(withReplacement=False, fraction=min(1.0, 5000 / max(selected_count, 1)), seed=42)
+                    .limit(5000)
+                    .toPandas()
+                )
+                st.markdown(f"##### {selected_numeric_feature} distribution in Cluster {selected_segment}")
+                if not numeric_sample.empty:
+                    numeric_fig = px.histogram(numeric_sample, x="Value", nbins=30, title=f"{selected_numeric_feature} distribution", color_discrete_sequence=["#31b9cf"])
+                    numeric_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color": text, "family": "Inter, Segoe UI, sans-serif"}, title_font={"color": text, "size": 16}, showlegend=False, margin={"l": 16, "r": 12, "t": 48, "b": 16})
+                    numeric_fig.update_xaxes(gridcolor=border, tickfont_color=muted)
+                    numeric_fig.update_yaxes(gridcolor=border, tickfont_color=muted, title_text="Records")
+                    st.plotly_chart(numeric_fig, use_container_width=True)
+                    if selected_count > 5000:
+                        st.caption("The histogram uses a random sample of up to 5,000 records for responsiveness.")
+
+            st.markdown("##### Records in this cluster")
+            display_table(segment.limit(100).toPandas())
+            segment_csv = segment.toPandas().to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                f"Download Cluster {selected_segment} records (CSV)",
+                data=segment_csv,
+                file_name=f"cluster_{selected_segment}_records.csv",
+                mime="text/csv",
+                key="download_selected_cluster",
+            )
+            st.caption("The table previews up to 100 rows. The download contains all records assigned to this cluster.")
+            display_table(result.limit(100).toPandas())
+            csv_bytes = result.toPandas().to_csv(index=False).encode("utf-8-sig")
+            st.download_button("Download clustered records (CSV)", data=csv_bytes, file_name="clustered_records.csv", mime="text/csv")
+            st.caption("The silhouette score is calculated with Spark MLlib's squared Euclidean distance. K-Means is sensitive to feature choice and outliers; review feature meaning and cluster balance before interpreting the results.")
 
 elif workspace_page == "Spark SQL":
     st.markdown("#### Spark SQL summary")

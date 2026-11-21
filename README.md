@@ -7,8 +7,15 @@ A student-friendly local project for exploring financial and banking **tabular**
 - CSV and Parquet uploads with detected schema, sample rows, missing values, and duplicate counts.
 - User-selected numeric and categorical features. Numeric gaps use median imputation; categories are indexed and one-hot encoded; assembled vectors are standardized.
 - Spark SQL row counts and a numeric-column profile.
+- A Financial summaries page with schema-driven numeric summaries and optional category breakdowns for any uploaded dataset.
 - Spark MLlib K-Means with a user-selected K and silhouette evaluation.
+- The Clustering sidebar expands into separate Run K-Means and Compare K values pages that share the selected features.
+- Compare silhouette scores for K=2 through a selected upper bound, then optionally use the best-scoring K from that comparison.
+- Cluster profiles with averages for selected numeric features and the most common value for selected categorical features.
+- Segment drill-down with a selected cluster's profile, categorical breakdowns, sampled numeric distributions, record preview, and cluster-specific CSV download.
+- Optional outcome-by-cluster analysis for any uploaded column. Numeric outcomes show per-cluster averages; categorical outcomes show counts and within-cluster shares. The selected outcome is excluded from the K-Means inputs.
 - Cluster distribution charts and CSV export.
+- Light and dark dashboard modes, with an explicit confirmation step before the app inspects and analyzes an uploaded dataset.
 - A step-by-step notebook and an approachable premium fintech dashboard.
 
 No database, API, cloud service, authentication, streaming, or deep-learning components are used. Data processing runs locally. Upload only manageable files on a 12 GB RAM machine; large files may take time and use substantial memory.
