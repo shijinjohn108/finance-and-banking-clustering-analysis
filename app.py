@@ -65,6 +65,25 @@ st.markdown(f"""
 .stApp {{background:transparent;color:{text};font-family:Inter,'Segoe UI',sans-serif}}
 [data-testid="stHeader"] {{background:transparent}}
 main .block-container {{max-width:1640px;padding-top:.8rem;padding-bottom:3rem}}
+.page-intro {{position:relative;display:flex;align-items:center;justify-content:space-between;gap:1.25rem;overflow:hidden;margin:.2rem 0 1.25rem;padding:1.2rem 1.45rem;border:1px solid {border};border-radius:16px;background:linear-gradient(115deg,{panel} 0%,{field} 100%);box-shadow:0 8px 24px #07152512}}
+.page-intro:after {{content:'◈';position:absolute;right:2.5%;top:-30px;color:#31b9cf13;font-size:130px;line-height:1;pointer-events:none}}
+.page-intro-copy {{position:relative;z-index:1;min-width:0}}
+.page-eyebrow {{margin-bottom:.3rem;color:#35b7bd;font-size:.66rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase}}
+.page-intro h2 {{margin:0;color:{text};font-size:1.42rem;font-weight:750;letter-spacing:-.035em}}
+.page-intro p {{max-width:850px;margin:.3rem 0 0;color:{muted};font-size:.9rem;line-height:1.45}}
+.dataset-chip {{position:relative;z-index:1;flex:none;max-width:36%;overflow:hidden;padding:.52rem .78rem;border:1px solid {border};border-radius:999px;background:{panel};color:{text};font-size:.77rem;font-weight:650;text-overflow:ellipsis;white-space:nowrap}}
+.dataset-chip:before {{content:'●';margin-right:.48rem;color:#42c6a5;font-size:.65rem}}
+main [data-testid="stMetric"] {{height:100%;transition:transform .16s ease,border-color .16s ease}}
+main [data-testid="stMetric"]:hover {{transform:translateY(-2px);border-color:#31a5a577!important}}
+main h3 {{margin-top:1.4rem}}
+main hr {{margin:1.5rem 0;border-color:{border}}}
+[data-testid="stWidgetLabel"] p {{line-height:1.35}}
+[data-testid="stTextInput"] input {{background:{field}!important;color:{text}!important;border:1px solid {border}!important;border-radius:10px!important}}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {{min-height:2.7rem}}
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div {{min-height:2.7rem}}
+[data-testid="stFileUploaderDropzone"] {{transition:border-color .16s ease,background .16s ease}}
+[data-testid="stFileUploaderDropzone"]:hover {{border-color:#31b9cf!important;background:#10243a!important}}
+button:focus-visible, input:focus-visible, textarea:focus-visible {{outline:2px solid #31b9cf!important;outline-offset:2px!important}}
 section[data-testid="stSidebar"] {{min-width:270px!important;max-width:290px!important;background:linear-gradient(180deg,#09182a 0%,#0d2137 58%,#102b42 100%)}}
 [data-testid="stSidebar"] * {{color:#edf5fc}}
 [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{color:#edf5fc!important}}
@@ -130,6 +149,14 @@ div.stButton>button:hover {{border-color:#31a5a5;color:#31a5a5;transform:transla
 [data-testid="stCode"] {{border-radius:12px}}
 div[data-testid="stAlert"] {{border-radius:12px;background:{panel};color:{text};border:1px solid {border}}}
 div[data-testid="stAlert"] p, div[data-testid="stAlert"] svg {{color:{text}!important}}
+@media (max-width: 760px) {{
+  main .block-container {{padding-left:1rem;padding-right:1rem}}
+  .page-intro {{align-items:flex-start;flex-direction:column;padding:1rem}}
+  .dataset-chip {{max-width:100%}}
+  .hero {{padding:1rem 1.1rem}}
+  .hero h1 {{font-size:1.55rem}}
+}}
+@media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{scroll-behavior:auto!important;transition:none!important;animation:none!important}} }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -296,6 +323,22 @@ except Exception as exc:
     st.error(f"Could not read this dataset: {exc}")
     st.stop()
 
+page_descriptions = {
+    "Explore data": ("Explore your data", "Review the detected schema, data quality, and a sample of your uploaded records."),
+    "Financial summaries": ("Financial summaries", "Summarize a numeric measure and compare it across categories in your dataset."),
+    "Trends over time": ("Trends over time", "Build a time series from date fields, measures, and optional categories."),
+    "Clustering": ("Clustering", "Create groups with Spark MLlib, compare cluster counts, and inspect segment profiles."),
+    "Spark SQL": ("Spark SQL", "Run read-only SQL queries against your uploaded data using Spark."),
+}
+page_title, page_description = page_descriptions[workspace_page]
+page_context = f"WORKSPACE  /  {workspace_page.upper()}"
+if workspace_page == "Clustering" and clustering_page:
+    page_context += f"  /  {clustering_page.upper()}"
+st.markdown(
+    f'<div class="page-intro"><div class="page-intro-copy"><div class="page-eyebrow">{html.escape(page_context)}</div><h2>{html.escape(page_title)}</h2><p>{html.escape(page_description)}</p></div><div class="dataset-chip" title="{html.escape(uploaded.name)}">{html.escape(uploaded.name)} · {info["rows"]:,} records</div></div>',
+    unsafe_allow_html=True,
+)
+
 st.subheader("Dataset overview")
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("Records", f"{info['rows']:,}")
@@ -319,7 +362,7 @@ if workspace_page == "Explore data":
     st.caption("No records are silently removed. Numeric missing values are imputed during modeling; categorical missing values are handled by Spark's invalid-category option.")
 
 elif workspace_page == "Financial summaries":
-    st.markdown("#### Financial summaries")
+    st.markdown("#### Select a measure")
     st.caption("Choose a numeric measure from your uploaded data. These are descriptive calculations; check what each row and field mean before interpreting totals.")
     if not info["numeric"]:
         st.info("This dataset has no detected numeric columns to summarize.")
@@ -381,7 +424,7 @@ elif workspace_page == "Financial summaries":
                 report_sections.append((f"Sum of {measure} by {group_by} chart", financial_fig))
 
 elif workspace_page == "Trends over time":
-    st.markdown("#### Trends over time")
+    st.markdown("#### Configure your time series")
     st.caption("Choose a date or time field and a measure to see how your data changes. The app uses your uploaded schema and column values.")
     temporal_candidates = [
         field.name
@@ -909,7 +952,7 @@ elif workspace_page == "Clustering":
             st.caption("The silhouette score is calculated with Spark MLlib's squared Euclidean distance. K-Means is sensitive to feature choice and outliers; review feature meaning and cluster balance before interpreting the results.")
 
 elif workspace_page == "Spark SQL":
-    st.markdown("#### Spark SQL summary")
+    st.markdown("#### Summary and query")
     st.caption("The app registers the uploaded data as a temporary Spark SQL view. Table and column identifiers are quoted from the detected schema.")
     view_name = "uploaded_dataset"
     df.createOrReplaceTempView(view_name)
