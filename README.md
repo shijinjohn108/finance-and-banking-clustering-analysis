@@ -5,7 +5,8 @@ A student-friendly local project for exploring financial and banking **tabular**
 ## Features
 
 - CSV and Parquet uploads with detected schema, sample rows, missing values, and duplicate counts.
-- User-selected numeric and categorical features. Numeric gaps use median imputation; categories are indexed and one-hot encoded; assembled vectors are standardized.
+- User-selected numeric and categorical features. Categories are indexed and one-hot encoded; feature vectors are scaled using the selected preprocessing settings.
+- User-controlled preprocessing: mean or median numeric imputation, keep or drop rows with missing selected values, keep or cap numeric outliers at the 1st/99th percentiles, and standard, min-max, or no scaling. A preview shows missing counts and numeric ranges before clustering.
 - Spark SQL row counts and a numeric-column profile.
 - A Financial summaries page with schema-driven numeric summaries and optional category breakdowns for any uploaded dataset.
 - A Trends over time page with selectable date formats or separate month/day/year columns, measures, aggregation methods, time intervals, optional category series, and CSV export.
@@ -17,6 +18,7 @@ A student-friendly local project for exploring financial and banking **tabular**
 - Segment drill-down with a selected cluster's profile, categorical breakdowns, sampled numeric distributions, record preview, and cluster-specific CSV download.
 - Optional outcome-by-cluster analysis for any uploaded column. Numeric outcomes show per-cluster averages; categorical outcomes show counts and within-cluster shares. The selected outcome is excluded from the K-Means inputs.
 - Cluster distribution charts and CSV export.
+- Optional 2D PCA cluster map using a deterministic sample of up to 5,000 records; plotted labels remain the K-Means assignments.
 - Light and dark dashboard modes, with an explicit confirmation step before the app inspects and analyzes an uploaded dataset.
 - A step-by-step notebook and an approachable premium fintech dashboard.
 

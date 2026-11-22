@@ -16,7 +16,7 @@ import streamlit as st
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from src.spark_engine import cluster_dataset, create_spark, inspect_dataset, read_dataset
+from src.spark_engine import cluster_dataset, create_spark, inspect_dataset, project_cluster_map, read_dataset
 
 px.defaults.color_discrete_sequence = ["#147D92", "#38A887", "#F0AE47", "#6678CE", "#D47769", "#7960A8"]
 
@@ -73,6 +73,20 @@ main .block-container {{max-width:1640px;padding-top:.8rem;padding-bottom:3rem}}
 .page-intro p {{max-width:850px;margin:.3rem 0 0;color:{muted};font-size:.9rem;line-height:1.45}}
 .dataset-chip {{position:relative;z-index:1;flex:none;max-width:36%;overflow:hidden;padding:.52rem .78rem;border:1px solid {border};border-radius:999px;background:{panel};color:{text};font-size:.77rem;font-weight:650;text-overflow:ellipsis;white-space:nowrap}}
 .dataset-chip:before {{content:'●';margin-right:.48rem;color:#42c6a5;font-size:.65rem}}
+.st-key-preprocessing_panel {{margin:.65rem 0 1rem;padding:1.05rem 1.1rem;border:1px solid {border};border-radius:18px;background:radial-gradient(ellipse at 0% 0%,#147d9210,transparent 40%),linear-gradient(120deg,{panel},{field});box-shadow:0 12px 30px #07152512}}
+.prep-panel-top {{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin:0 0 .9rem}}
+.prep-panel-kicker {{color:#36b7bf;font-size:.66rem;font-weight:850;letter-spacing:.17em;text-transform:uppercase}}
+.prep-panel-title {{margin:.18rem 0 0;color:{text};font-size:1.13rem;font-weight:760;letter-spacing:-.025em}}
+.prep-panel-description {{margin:.22rem 0 0;color:{muted};font-size:.86rem}}
+.prep-panel-badge {{flex:none;padding:.42rem .68rem;border:1px solid {border};border-radius:999px;background:{panel};color:{muted};font-size:.68rem;font-weight:750;letter-spacing:.08em}}
+.prep-choice {{display:flex;align-items:flex-start;gap:.72rem;margin:.55rem 0 .1rem;padding:.72rem .78rem;border:1px solid {border};border-radius:13px;background:{field};transition:border-color .16s ease,transform .16s ease}}
+.prep-choice:hover {{transform:translateY(-1px);border-color:#31b9cf88}}
+.prep-choice-icon {{display:grid;place-items:center;flex:none;width:34px;height:34px;border-radius:10px;background:linear-gradient(145deg,#31b9cf28,#9a6cff20);color:#39b9c5;font-size:1rem;font-weight:800}}
+.prep-choice-title {{margin:0;color:{text};font-size:.82rem;font-weight:750;letter-spacing:.025em}}
+.prep-choice-copy {{margin:.16rem 0 0;color:{muted};font-size:.75rem;line-height:1.4}}
+.st-key-preprocessing_panel [data-testid="stSelectbox"] {{margin-top:-.1rem}}
+[data-testid="stExpander"] {{border:1px solid {border};border-radius:14px;background:{panel};overflow:hidden}}
+[data-testid="stExpander"] summary {{font-weight:700;color:{text}}}
 main [data-testid="stMetric"] {{height:100%;transition:transform .16s ease,border-color .16s ease}}
 main [data-testid="stMetric"]:hover {{transform:translateY(-2px);border-color:#31a5a577!important}}
 main h3 {{margin-top:1.4rem}}
@@ -155,6 +169,8 @@ div[data-testid="stAlert"] p, div[data-testid="stAlert"] svg {{color:{text}!impo
   .dataset-chip {{max-width:100%}}
   .hero {{padding:1rem 1.1rem}}
   .hero h1 {{font-size:1.55rem}}
+  .st-key-preprocessing_panel {{padding:.85rem}}
+  .prep-panel-top {{align-items:flex-start;flex-direction:column}}
 }}
 @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{scroll-behavior:auto!important;transition:none!important;animation:none!important}} }}
 </style>
@@ -217,6 +233,10 @@ st.markdown('<div class="hero"><div class="hero-kicker">FINANCE ANALYTICS · POW
 
 if not uploaded:
     st.session_state.pop("cluster_result", None)
+    st.session_state.pop("cluster_map_data", None)
+    st.session_state.pop("cluster_map_key", None)
+    for state_key in ("cluster_preprocessing", "cluster_map_data", "cluster_map_key", "cluster_missing_rows", "cluster_missing_rows_key", "cluster_prep_preview", "cluster_prep_preview_key"):
+        st.session_state.pop(state_key, None)
     st.session_state.pop("active_upload", None)
     st.session_state.pop("confirmed_upload", None)
     st.session_state.pop("cancelled_upload", None)
@@ -252,6 +272,10 @@ uploaded_bytes = uploaded.getvalue()
 upload_identity = (uploaded.name, uploaded.size, hashlib.sha256(uploaded_bytes).hexdigest())
 if st.session_state.get("active_upload") != upload_identity:
     st.session_state.pop("cluster_result", None)
+    st.session_state.pop("cluster_map_data", None)
+    st.session_state.pop("cluster_map_key", None)
+    for state_key in ("cluster_preprocessing", "cluster_missing_rows", "cluster_missing_rows_key", "cluster_prep_preview", "cluster_prep_preview_key"):
+        st.session_state.pop(state_key, None)
     st.session_state.pop("cluster_score", None)
     st.session_state.pop("confirmed_upload", None)
     st.session_state.pop("cancelled_upload", None)
@@ -678,12 +702,162 @@ elif workspace_page == "Clustering":
     if outcome_column:
         st.caption(f"Outcome selected: **{outcome_column}**. It will be summarized by cluster after K-Means runs.")
 
+    with st.container(key="preprocessing_panel"):
+        st.markdown(
+            '<div class="prep-panel-top"><div><div class="prep-panel-kicker">Preprocessing studio</div><div class="prep-panel-title">Shape the data before clustering</div><div class="prep-panel-description">Choose how Spark handles incomplete rows, extreme values, and feature scales.</div></div><div class="prep-panel-badge">4 MODEL SETTINGS</div></div>',
+            unsafe_allow_html=True,
+        )
+        prep_left, prep_right = st.columns(2, gap="large")
+        with prep_left:
+            st.markdown('<div class="prep-choice"><div class="prep-choice-icon">↕</div><div><div class="prep-choice-title">ROW RETENTION</div><div class="prep-choice-copy">Keep incomplete rows or remove rows with missing selected features.</div></div></div>', unsafe_allow_html=True)
+            missing_policy_label = st.selectbox(
+                "Rows with missing selected values",
+                ["Keep rows and prepare missing values", "Drop rows missing a selected feature"],
+                key="cluster_missing_policy_choice",
+                help="When kept, numeric gaps use your selected fill method and blank categories become an unknown category.",
+            )
+            st.markdown('<div class="prep-choice"><div class="prep-choice-icon">μ</div><div><div class="prep-choice-title">NUMERIC GAPS</div><div class="prep-choice-copy">Fill empty numeric cells with a typical value.</div></div></div>', unsafe_allow_html=True)
+            numeric_imputation_label = st.selectbox(
+                "Fill missing numeric values with",
+                ["Median", "Mean"],
+                key="cluster_numeric_imputation_choice",
+                help="Median is less affected by extreme values; mean uses the arithmetic average.",
+                disabled=not any(feature in info["numeric"] for feature in model_features),
+            )
+        with prep_right:
+            st.markdown('<div class="prep-choice"><div class="prep-choice-icon">⌁</div><div><div class="prep-choice-title">EXTREME VALUES</div><div class="prep-choice-copy">Keep the tails or cap them at the 1st and 99th percentiles.</div></div></div>', unsafe_allow_html=True)
+            outlier_label = st.selectbox(
+                "Extreme numeric values",
+                ["Keep all values", "Cap at the 1st–99th percentiles"],
+                key="cluster_outlier_choice",
+                help="Capping limits very low and high numeric values to their approximate 1st and 99th percentile bounds.",
+                disabled=not any(feature in info["numeric"] for feature in model_features),
+            )
+            st.markdown('<div class="prep-choice"><div class="prep-choice-icon">◉</div><div><div class="prep-choice-title">FEATURE SCALE</div><div class="prep-choice-copy">Put differently sized features onto a comparable distance scale.</div></div></div>', unsafe_allow_html=True)
+            scaling_label = st.selectbox(
+                "Scale selected features",
+                ["Standardize (recommended)", "Min-max (0 to 1)", "No scaling"],
+                key="cluster_scaling_choice",
+                help="K-Means uses distance. Without scaling, fields with larger numeric ranges can dominate.",
+            )
+
+    missing_policy = "drop" if missing_policy_label.startswith("Drop rows") else "keep"
+    numeric_imputation = numeric_imputation_label.lower()
+    outlier_treatment = "cap" if outlier_label.startswith("Cap") else "keep"
+    scaling = {"Standardize (recommended)": "standard", "Min-max (0 to 1)": "minmax", "No scaling": "none"}[scaling_label]
+    preprocessing = (numeric_imputation, missing_policy, outlier_treatment, scaling)
+    report_sections.append(("Selected preprocessing", pd.DataFrame([{
+        "Numeric fill": numeric_imputation.title(),
+        "Missing rows": "Drop selected-feature gaps" if missing_policy == "drop" else "Keep and prepare",
+        "Outliers": "Cap at 1st–99th percentile" if outlier_treatment == "cap" else "Keep all",
+        "Scaling": scaling_label,
+    }])))
+
+    if missing_policy == "drop" and model_features:
+        missing_rows_key = (upload_identity, tuple(model_features))
+        if st.session_state.get("cluster_missing_rows_key") != missing_rows_key:
+            has_missing_feature = F.lit(False)
+            for feature in model_features:
+                quoted_feature = "`" + feature.replace("`", "``") + "`"
+                field_value = F.col(quoted_feature)
+                has_missing_feature = has_missing_feature | field_value.isNull() | (F.trim(field_value.cast("string")) == "")
+            st.session_state["cluster_missing_rows"] = df.filter(has_missing_feature).count()
+            st.session_state["cluster_missing_rows_key"] = missing_rows_key
+        missing_selected_rows = int(st.session_state["cluster_missing_rows"])
+        rows_for_model = info["rows"] - missing_selected_rows
+    else:
+        missing_selected_rows = None
+        rows_for_model = info["rows"]
+    if missing_policy == "drop":
+        st.caption(f"Preprocessing will use **{rows_for_model:,} of {info['rows']:,} rows**; {missing_selected_rows:,} rows with missing selected features will be excluded.")
+    else:
+        st.caption("All rows are retained. Numeric gaps use the selected fill method; missing or blank categories are treated as unknown.")
+
+    with st.expander("Preview preprocessing impact"):
+        st.caption("Preview missing values and numeric ranges in your chosen clustering features before running Spark.")
+        if st.button("Preview changes", key="preview_preprocessing", disabled=not model_features):
+            missing_expressions = []
+            numeric_features_for_preview = [feature for feature in model_features if feature in info["numeric"]]
+            numeric_expressions = []
+            for index, feature in enumerate(model_features):
+                quoted_feature = "`" + feature.replace("`", "``") + "`"
+                value = F.col(quoted_feature)
+                missing_expressions.append(
+                    F.sum(F.when(value.isNull() | (F.trim(value.cast("string")) == ""), 1).otherwise(0)).alias(f"missing_{index}")
+                )
+                if feature in numeric_features_for_preview:
+                    numeric_expressions.extend([
+                        F.min(value).alias(f"minimum_{index}"),
+                        F.max(value).alias(f"maximum_{index}"),
+                    ])
+            preview_source = df
+            if missing_policy == "drop":
+                drop_mask = F.lit(False)
+                for feature in model_features:
+                    quoted_feature = "`" + feature.replace("`", "``") + "`"
+                    field_value = F.col(quoted_feature)
+                    drop_mask = drop_mask | field_value.isNull() | (F.trim(field_value.cast("string")) == "")
+                preview_source = df.filter(~drop_mask)
+            missing_stats = df.agg(*missing_expressions).first().asDict()
+            numeric_stats = preview_source.agg(*numeric_expressions).first().asDict() if numeric_expressions else {}
+            stats = {**missing_stats, **numeric_stats}
+            percentile_bounds = preview_source.approxQuantile(numeric_features_for_preview, [0.01, 0.99], 0.01) if numeric_features_for_preview else []
+            percentile_by_feature = dict(zip(numeric_features_for_preview, percentile_bounds))
+            preview_rows = []
+            for index, feature in enumerate(model_features):
+                bounds = percentile_by_feature.get(feature, [])
+                preview_rows.append({
+                    "Feature": feature,
+                    "Type": "Numeric" if feature in info["numeric"] else "Categorical",
+                    "Missing": int(stats.get(f"missing_{index}") or 0),
+                    "Minimum": stats.get(f"minimum_{index}"),
+                    "1st percentile": bounds[0] if len(bounds) == 2 else None,
+                    "99th percentile": bounds[1] if len(bounds) == 2 else None,
+                    "Maximum": stats.get(f"maximum_{index}"),
+                })
+            if missing_selected_rows is None:
+                any_missing = F.lit(False)
+                for feature in model_features:
+                    quoted_feature = "`" + feature.replace("`", "``") + "`"
+                    field_value = F.col(quoted_feature)
+                    any_missing = any_missing | field_value.isNull() | (F.trim(field_value.cast("string")) == "")
+                preview_missing_rows = df.filter(any_missing).count()
+            else:
+                preview_missing_rows = missing_selected_rows
+            preview_rows_for_model = info["rows"] - preview_missing_rows if missing_policy == "drop" else info["rows"]
+            st.session_state["cluster_prep_preview"] = {
+                "table": pd.DataFrame(preview_rows),
+                "rows_missing": preview_missing_rows,
+                "rows_used": preview_rows_for_model,
+                "key": (tuple(model_features), preprocessing),
+            }
+            st.session_state["cluster_prep_preview_key"] = (tuple(model_features), preprocessing)
+
+        active_preview_key = (tuple(model_features), preprocessing)
+        if st.session_state.get("cluster_prep_preview_key") == active_preview_key:
+            preview = st.session_state["cluster_prep_preview"]
+            preview_metrics = st.columns(3)
+            preview_metrics[0].metric("Rows in upload", f"{info['rows']:,}")
+            preview_metrics[1].metric("Rows with missing selected values", f"{preview['rows_missing']:,}")
+            preview_metrics[2].metric("Rows used by K-Means", f"{preview['rows_used']:,}")
+            display_table(preview["table"])
+            if outlier_treatment == "cap":
+                st.caption("If capping is selected, values below the 1st percentile or above the 99th percentile will be clipped before scaling.")
+            if missing_policy == "keep":
+                st.caption("All rows stay in the analysis; missing numeric values are filled and blank categories are treated as unknown.")
+            elif preview["rows_missing"]:
+                st.caption(f"{preview['rows_missing']:,} rows with a missing selected value will be excluded from clustering.")
+
+    st.caption(f"Current preprocessing: {numeric_imputation.title()} fill · {outlier_label.lower()} · {scaling_label.lower()}.")
+
     if clustering_page == "Compare K values":
         st.markdown("#### Compare candidate cluster counts")
-        if info["rows"] < 3:
-            st.info("At least three records are needed to compare multiple K values.")
+        if rows_for_model < 3:
+            st.info(f"At least three records must remain after preprocessing to compare multiple K values; currently {rows_for_model:,} will be used.")
         else:
-            compare_upper = min(8, info["rows"])
+            compare_upper = min(8, rows_for_model)
+            if st.session_state.get("compare_max_k", min(5, compare_upper)) > compare_upper:
+                st.session_state.pop("compare_max_k", None)
             compare_max = st.slider(
                 "Compare K from 2 through",
                 min_value=3,
@@ -691,7 +865,7 @@ elif workspace_page == "Clustering":
                 value=min(5, compare_upper),
                 key="compare_max_k",
             )
-            comparison_key = (tuple(model_features), compare_max)
+            comparison_key = (tuple(model_features), compare_max, preprocessing)
             if st.session_state.get("k_comparison_key") not in (None, comparison_key):
                 st.session_state.pop("k_comparison", None)
                 st.session_state.pop("k_comparison_key", None)
@@ -701,7 +875,15 @@ elif workspace_page == "Clustering":
                     with st.spinner(f"Comparing K=2 through K={compare_max} with Spark…"):
                         scores = []
                         for candidate_k in range(2, compare_max + 1):
-                            _, candidate_score = cluster_dataset(df, model_features, candidate_k)
+                            _, candidate_score = cluster_dataset(
+                                df,
+                                model_features,
+                                candidate_k,
+                                numeric_imputation=numeric_imputation,
+                                missing_policy=missing_policy,
+                                outlier_treatment=outlier_treatment,
+                                scaling=scaling,
+                            )
                             scores.append({"K": candidate_k, "Silhouette": candidate_score})
                     st.session_state["k_comparison"] = scores
                     st.session_state["k_comparison_key"] = comparison_key
@@ -715,7 +897,7 @@ elif workspace_page == "Clustering":
                 best_score = float(best_row["Silhouette"])
                 score_col, use_col = st.columns([1, 2])
                 score_col.metric("Highest score in this range", f"{best_score:.3f}", help="A higher silhouette score is generally preferable, but also check cluster balance and interpretability.")
-                if best_k != st.session_state.get("selected_k", min(3, max(2, min(10, info["rows"])) )):
+                if best_k != st.session_state.get("selected_k", min(3, max(2, min(10, rows_for_model))) ):
                     use_col.button(
                         f"Use K = {best_k} in Run K-Means",
                         key="use_compared_k",
@@ -735,26 +917,44 @@ elif workspace_page == "Clustering":
 
     else:
         st.markdown("#### Run K-Means")
-        max_k = max(2, min(10, info["rows"]))
+        max_k = max(2, min(10, rows_for_model))
+        if rows_for_model < 2:
+            st.warning("Fewer than two rows remain with the current preprocessing choices. Keep more rows or change the selected features.")
+        if st.session_state.get("selected_k", min(3, max_k)) > max_k:
+            st.session_state["selected_k"] = max_k
         k = st.slider("Number of clusters (K)", min_value=2, max_value=max_k, value=min(3,max_k), key="selected_k")
         if "cluster_result" in st.session_state and (
             tuple(st.session_state.get("cluster_features", ())) != tuple(model_features)
             or st.session_state.get("cluster_k") != k
+            or st.session_state.get("cluster_preprocessing") != preprocessing
         ):
             st.session_state.pop("cluster_result", None)
             st.session_state.pop("cluster_score", None)
+            st.session_state.pop("cluster_map_data", None)
+            st.session_state.pop("cluster_map_key", None)
             st.session_state.pop("segment_drilldown_cluster", None)
             st.session_state.pop("segment_category_feature", None)
             st.session_state.pop("segment_numeric_feature", None)
-        if st.button("Run K-Means with Spark", type="primary", disabled=info["rows"] < 2 or len(model_features) == 0):
+        if st.button("Run K-Means with Spark", type="primary", disabled=rows_for_model < 2 or len(model_features) == 0):
             with st.spinner("Preparing features and fitting Spark MLlib K-Means…"):
                 try:
-                    result, score = cluster_dataset(df, model_features, k)
+                    result, score = cluster_dataset(
+                        df,
+                        model_features,
+                        k,
+                        numeric_imputation=numeric_imputation,
+                        missing_policy=missing_policy,
+                        outlier_treatment=outlier_treatment,
+                        scaling=scaling,
+                    )
                     st.session_state.cluster_result = result
                     st.session_state.cluster_score = score
                     st.session_state.cluster_k = k
                     st.session_state.cluster_features = tuple(model_features)
+                    st.session_state.cluster_preprocessing = preprocessing
                     st.session_state.cluster_outcome = outcome_column
+                    st.session_state.pop("cluster_map_data", None)
+                    st.session_state.pop("cluster_map_key", None)
                 except Exception as exc:
                     st.error(f"Clustering could not be completed: {exc}")
         if "cluster_result" in st.session_state:
@@ -766,8 +966,14 @@ elif workspace_page == "Clustering":
                 "Clusters (K)": st.session_state.get("cluster_k", k),
                 "Silhouette score": round(float(score), 4),
                 "Features": ", ".join(st.session_state.get("cluster_features", tuple(model_features))),
+                "Numeric fill": numeric_imputation.title(),
+                "Missing rows": "Dropped" if missing_policy == "drop" else "Kept and prepared",
+                "Outliers": "Capped at 1st–99th percentile" if outlier_treatment == "cap" else "Kept",
+                "Scaling": scaling_label,
             }])))
             report_sections.append(("Records per cluster", summary))
+            if st.session_state.get("cluster_prep_preview_key") == (tuple(model_features), preprocessing):
+                report_sections.append(("Preprocessing preview", st.session_state["cluster_prep_preview"]["table"]))
             left,right=st.columns([1,1])
             with left:
                 bar_fig = px.bar(summary, x="Cluster", y="Records", color="Cluster", title="Records per cluster", color_discrete_sequence=["#31b9cf","#9a6cff","#42c6a5","#efb750","#ed7b8e"])
@@ -782,6 +988,51 @@ elif workspace_page == "Clustering":
                 pie_fig.update_traces(textfont_color="#f4f7fb", marker_line_color=panel, marker_line_width=2)
                 st.plotly_chart(pie_fig, use_container_width=True)
                 report_sections.append(("Cluster distribution chart", pie_fig))
+            st.markdown("#### 2D cluster map")
+            st.caption("PCA compresses the selected feature space into two display axes. Point colors show the existing K-Means labels; the map does not change cluster assignments.")
+            map_features = tuple(st.session_state.get("cluster_features", tuple(model_features)))
+            map_preprocessing = st.session_state.get("cluster_preprocessing", preprocessing)
+            map_key = (upload_identity, map_features, st.session_state.get("cluster_k", k), map_preprocessing)
+            if st.session_state.get("cluster_map_key") != map_key:
+                st.session_state.pop("cluster_map_data", None)
+                st.session_state.pop("cluster_map_key", None)
+            if st.button("Build 2D cluster map", key="build_cluster_map", type="secondary"):
+                try:
+                    with st.spinner("Projecting a sample of clustered records into two dimensions…"):
+                        map_imputation, map_missing, map_outliers, map_scaling = map_preprocessing
+                        st.session_state["cluster_map_data"] = project_cluster_map(
+                            result,
+                            map_features,
+                            max_points=5000,
+                            numeric_imputation=map_imputation,
+                            missing_policy=map_missing,
+                            outlier_treatment=map_outliers,
+                            scaling=map_scaling,
+                        )
+                        st.session_state["cluster_map_key"] = map_key
+                except Exception as exc:
+                    st.error(f"The 2D cluster map could not be built: {exc}")
+            if st.session_state.get("cluster_map_key") == map_key and "cluster_map_data" in st.session_state:
+                map_pd = st.session_state["cluster_map_data"].copy()
+                map_pd["Cluster"] = "Cluster " + map_pd["Cluster"].astype(str)
+                map_fig = px.scatter(
+                    map_pd,
+                    x="PC 1",
+                    y="PC 2",
+                    color="Cluster",
+                    title="PCA view of clustered records",
+                    opacity=0.72,
+                    render_mode="webgl",
+                    color_discrete_sequence=["#31b9cf", "#9a6cff", "#42c6a5", "#efb750", "#ed7b8e", "#7da8ff", "#f08ec2", "#a1d978"],
+                )
+                map_fig.update_traces(marker={"size": 6})
+                map_fig.update_layout(paper_bgcolor=panel, plot_bgcolor=panel, font={"color": text, "family": "Inter, Segoe UI, sans-serif"}, title_font={"color": text, "size": 16}, legend_title_text="Assigned group", margin={"l": 16, "r": 12, "t": 48, "b": 16})
+                map_fig.update_xaxes(zeroline=True, zerolinecolor=border, showgrid=True, gridcolor=border, tickfont_color=muted, title_text="Principal component 1")
+                map_fig.update_yaxes(zeroline=True, zerolinecolor=border, showgrid=True, gridcolor=border, tickfont_color=muted, title_text="Principal component 2")
+                st.plotly_chart(map_fig, use_container_width=True)
+                report_sections.append(("2D PCA cluster map", map_fig))
+                if len(map_pd) < info["rows"]:
+                    st.caption(f"Showing a deterministic sample of {len(map_pd):,} of {info['rows']:,} records for responsiveness.")
             st.markdown("#### Cluster profiles")
             st.caption("Numeric features show their cluster average; categorical features show their most common value.")
             model_features = st.session_state.get("cluster_features", tuple(features))
@@ -872,11 +1123,14 @@ elif workspace_page == "Clustering":
             )
             segment = result.filter(F.col("prediction") == selected_segment)
             selected_count = int(segment_records[selected_segment])
-            segment_share = selected_count / max(int(info["rows"]), 1) * 100
+            clustered_row_count = int(summary["Records"].sum())
+            segment_share = selected_count / max(clustered_row_count, 1) * 100
             drill_metrics = st.columns(3)
             drill_metrics[0].metric("Records in cluster", f"{selected_count:,}")
-            drill_metrics[1].metric("Share of dataset", f"{segment_share:.1f}%")
+            drill_metrics[1].metric("Share of clustered rows", f"{segment_share:.1f}%")
             drill_metrics[2].metric("Features used", len(model_features))
+            if clustered_row_count < info["rows"]:
+                st.caption(f"{info['rows'] - clustered_row_count:,} rows were excluded because a selected feature was missing.")
             selected_profile = profile.loc[profile["Cluster"] == selected_segment]
             st.markdown("##### This cluster's profile")
             display_table(selected_profile)
@@ -949,6 +1203,8 @@ elif workspace_page == "Clustering":
             display_table(result.limit(100).toPandas())
             csv_bytes = result.toPandas().to_csv(index=False).encode("utf-8-sig")
             st.download_button("Download clustered records (CSV)", data=csv_bytes, file_name="clustered_records.csv", mime="text/csv")
+            if clustered_row_count < info["rows"]:
+                st.caption(f"K-Means and both CSV downloads include only the {clustered_row_count:,} rows used after preprocessing; the other {info['rows'] - clustered_row_count:,} rows were excluded.")
             st.caption("The silhouette score is calculated with Spark MLlib's squared Euclidean distance. K-Means is sensitive to feature choice and outliers; review feature meaning and cluster balance before interpreting the results.")
 
 elif workspace_page == "Spark SQL":
